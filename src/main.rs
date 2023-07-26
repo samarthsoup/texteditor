@@ -13,51 +13,60 @@ const QUIT_TIMES: u8 = 3;
 
 #[macro_export]
 macro_rules! prompt {
-    ($output:expr,$($args:tt)*) => {{
-        let output:&mut Output = $output;
+    ($output:expr,$args:tt) => {
+        prompt!($output, $args, callback = |&_, _, _| {})
+    };
+    ($output:expr,$args:tt, callback = $callback:expr) => {{
+        let output: &mut Output = $output;
         let mut input = String::with_capacity(32);
         loop {
-            output.status_message.set_message(format!($($args)*, input));
+            output.status_message.set_message(format!($args, input)); 
             output.refresh_screen()?;
-            match Reader.read_key()? {
+            let key_event = Reader.read_key()?;
+            match key_event {
                 KeyEvent {
-                    code:KeyCode::Enter,
-                    modifiers:KeyModifiers::NONE
+                    code: KeyCode::Enter,
+                    modifiers: KeyModifiers::NONE,
                 } => {
                     if !input.is_empty() {
                         output.status_message.set_message(String::new());
+                        $callback(output, &input, KeyCode::Enter); 
                         break;
                     }
                 }
                 KeyEvent {
-                    code: KeyCode::Esc,
-                    ..
+                    code: KeyCode::Esc, ..
                 } => {
                     output.status_message.set_message(String::new());
                     input.clear();
+                    $callback(output, &input, KeyCode::Esc); 
                     break;
                 }
-                
                 KeyEvent {
                     code: KeyCode::Backspace | KeyCode::Delete,
                     modifiers: KeyModifiers::NONE,
-                } =>  {
+                } => {
                     input.pop();
                 }
-                
                 KeyEvent {
                     code: code @ (KeyCode::Char(..) | KeyCode::Tab),
                     modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
-                } => input.push(match code {
+                } => {
+                    input.push(match code {
                         KeyCode::Tab => '\t',
                         KeyCode::Char(ch) => ch,
                         _ => unreachable!(),
-                    }),
-
-                _=> {}
+                    });
+                }
+                _ => {}
             }
+            $callback(output, &input, key_event.code); 
         }
-        if input.is_empty() { None } else { Some (input) }
+        if input.is_empty() {
+            None
+        } else {
+            Some(input)
+        }
     }};
 }
 
@@ -85,6 +94,7 @@ impl Reader {
     }
 }
 
+#[derive(Copy, Clone)] 
 struct CursorController {
     cursor_x: usize,
     cursor_y: usize,
@@ -92,7 +102,7 @@ struct CursorController {
     screen_columns: usize,
     row_offset: usize,
     column_offset: usize,
-    render_x: usize
+    render_x: usize,
 }
 
 impl CursorController {
@@ -184,6 +194,37 @@ impl CursorController {
     }
 }
 
+enum SearchDirection {
+    Forward,
+    Backward,
+}
+
+struct SearchIndex {
+    x_index: usize,
+    y_index: usize,
+    x_direction: Option<SearchDirection>,
+    y_direction: Option<SearchDirection>,
+}
+
+impl SearchIndex {
+    fn new() -> Self {
+        Self {
+            x_index: 0,
+            y_index: 0,
+            x_direction: None,
+            y_direction: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.y_index = 0;
+        self.x_index = 0;
+        self.y_direction = None;
+        self.x_direction = None;
+    }
+}
+
+
 struct StatusMessage {
     message: Option<String>,
     set_time: Option<Instant>,
@@ -221,7 +262,8 @@ struct Output {
     cursor_controller: CursorController,
     editor_rows: EditorRows,
     status_message: StatusMessage,
-    dirty: u64
+    dirty: u64,
+    search_index: SearchIndex, 
 }
 
 impl Output {
@@ -234,8 +276,11 @@ impl Output {
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
             editor_rows: EditorRows::new(),
-            status_message: StatusMessage::new("HELP: Ctrl-S = Save | Ctrl-Q = Quit ".into()),
-            dirty: 0, 
+            status_message: StatusMessage::new(
+                "HELP: Ctrl-S = Save | Ctrl-Q = Quit | Ctrl-F = Find".into(),
+            ),
+            dirty: 0,
+            search_index: SearchIndex::new(), 
         }
     }
 
@@ -279,6 +324,99 @@ impl Output {
             .unwrap();
             self.editor_contents.push_str("\r\n");
         }
+    }
+
+    fn find_callback(output: &mut Output, keyword: &str, key_code: KeyCode) {
+        match key_code {
+            KeyCode::Esc | KeyCode::Enter => {
+                output.search_index.reset();
+            }
+            _ => {
+                output.search_index.y_direction = None;
+                output.search_index.x_direction = None; 
+                match key_code {
+                    KeyCode::Down => {
+                        output.search_index.y_direction = SearchDirection::Forward.into()
+                    }
+                    KeyCode::Up => {
+                        output.search_index.y_direction = SearchDirection::Backward.into()
+                    }
+                    KeyCode::Left => {
+                        output.search_index.x_direction = SearchDirection::Backward.into()
+                    }
+                    KeyCode::Right => {
+                        output.search_index.x_direction = SearchDirection::Forward.into()
+                    }
+                    _ => {}
+                }
+                for i in 0..output.editor_rows.number_of_rows() {
+                    let row_index = match output.search_index.y_direction.as_ref() {
+                        None => {
+                            if output.search_index.x_direction.is_none() {
+                                output.search_index.y_index = i;
+                            }
+                            output.search_index.y_index
+                        }
+                        Some(dir) => {
+                            if matches!(dir, SearchDirection::Forward) {
+                                output.search_index.y_index + i + 1
+                            } else {
+                                let res = output.search_index.y_index.saturating_sub(i);
+                                if res == 0 {
+                                    break;
+                                }
+                                res - 1
+                            }
+                        }
+                    };
+                    if row_index > output.editor_rows.number_of_rows() - 1 {
+                        break;
+                    }
+                    let row = output.editor_rows.get_editor_row(row_index);
+                    let index = match output.search_index.x_direction.as_ref() {
+                        None => row.render.find(&keyword),
+                        Some(dir) => {
+                            let index = if matches!(dir, SearchDirection::Forward) {
+                                let start =
+                                    cmp::min(row.render.len(), output.search_index.x_index + 1);
+                                row.render[start..]
+                                    .find(&keyword)
+                                    .map(|index| index + start)
+                            } else {
+                                row.render[..output.search_index.x_index].rfind(&keyword)
+                            };
+                            if index.is_none() {
+                                break;
+                            }
+                            index
+                        }
+                    };
+                    
+                    if let Some(index) = index {
+                        output.cursor_controller.cursor_y = row_index;
+                        output.search_index.y_index = row_index;
+                        output.search_index.x_index = index; 
+                        output.cursor_controller.cursor_x = row.get_row_content_x(index);
+                        output.cursor_controller.row_offset = output.editor_rows.number_of_rows();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn find(&mut self) -> std::io::Result<()> {
+        let cursor_controller = self.cursor_controller;
+        if prompt!(
+            self,
+            "Search: {} (Use ESC / Arrows / Enter)",
+            callback = Output::find_callback
+        )
+        .is_none()
+        {
+            self.cursor_controller = cursor_controller
+        }
+        Ok(())
     }
 
     fn draw_status_bar(&mut self) {
@@ -473,6 +611,20 @@ impl Row {
         self.row_content.remove(at);
         EditorRows::render_row(self)
     }
+
+    fn get_row_content_x(&self, render_x: usize) -> usize {
+        let mut current_render_x = 0;
+        for (cursor_x, ch) in self.row_content.chars().enumerate() {
+            if ch == '\t' {
+                current_render_x += (TAB_STOP - 1) - (current_render_x % TAB_STOP);
+            }
+            current_render_x += 1;
+            if current_render_x > render_x {
+                return cursor_x;
+            }
+        }
+        0
+    }
 }
 
 struct EditorRows {
@@ -649,7 +801,6 @@ impl Editor {
                 code: KeyCode::Char('s'),
                 modifiers: KeyModifiers::CONTROL,
             } => {
-                
                 if matches!(self.output.editor_rows.filename, None) {
                     let prompt = prompt!(&mut self.output, "Save as : {} (ESC to cancel)")
                         .map(|it| it.into());
@@ -667,6 +818,12 @@ impl Editor {
                         .set_message(format!("{} bytes written to disk", len));
                     self.output.dirty = 0
                 })?;
+            }
+            KeyEvent {
+                code: KeyCode::Char('f'),
+                modifiers: KeyModifiers::CONTROL,
+            } => {
+                self.output.find()?;
             }
             KeyEvent {
                 code: key @ (KeyCode::Backspace | KeyCode::Delete),
