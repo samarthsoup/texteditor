@@ -63,7 +63,7 @@ impl Output {
             cursor_controller: CursorController::new(win_size),
             editor_rows: EditorRows::new(),
             status_message: StatusMessage::new(
-                "HELP: Ctrl-S = Save | Ctrl-Q = Quit | Ctrl-F = Find".into(),
+                "help: ctrl+S = save | ctrl+Q = quit | ctrl+F = find".into(),
             ),
             dirty: 0,
             search_index: SearchIndex::new(), 
@@ -195,7 +195,7 @@ impl Output {
         let cursor_controller = self.cursor_controller;
         if prompt!(
             self,
-            "Search: {} (Use ESC / Arrows / Enter)",
+            "search: {} (use esc / arrows / enter)",
             callback = Output::find_callback
         )
         .is_none()
@@ -215,7 +215,7 @@ impl Output {
                 .as_ref()
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str())
-                .unwrap_or("[No Name]"),
+                .unwrap_or("[no name]"),
             if self.dirty > 0 { "(modified)" } else { "" }, 
             self.editor_rows.number_of_rows()
         );

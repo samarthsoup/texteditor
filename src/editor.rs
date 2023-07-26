@@ -105,7 +105,7 @@ impl EditorRows {
     }
 
     pub fn from_file(file: PathBuf) -> Self {
-        let file_contents = fs::read_to_string(&file).expect("Unable to read file"); 
+        let file_contents = fs::read_to_string(&file).expect("unable to read file"); 
         Self {
             filename: Some(file), 
             row_contents: file_contents
@@ -217,7 +217,7 @@ impl Editor {
             } => {
                 if self.output.dirty > 0 && self.quit_times > 0 {
                     self.output.status_message.set_message(format!(
-                        "WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.",
+                        "warning!!! file has unsaved changes. press ctrl+Q {} more times to quit.",
                         self.quit_times
                     ));
                     self.quit_times -= 1;
@@ -263,12 +263,12 @@ impl Editor {
                 modifiers: KeyModifiers::CONTROL,
             } => {
                 if matches!(self.output.editor_rows.filename, None) {
-                    let prompt = prompt!(&mut self.output, "Save as : {} (ESC to cancel)")
+                    let prompt = prompt!(&mut self.output, "save as : {} (esc to cancel)")
                         .map(|it| it.into());
                     if let None = prompt {
                         self.output
                             .status_message
-                            .set_message("Save Aborted".into());
+                            .set_message("save aborted".into());
                         return Ok(true);
                     }
                     self.output.editor_rows.filename = prompt
