@@ -1,14 +1,65 @@
 use crossterm::event::*;
 use crossterm::terminal::ClearType; 
-use std::io::{Write, stdout};
+use std::io::{Write, stdout, ErrorKind};
 use std::time::{Duration, Instant};
 use std::{cmp, env, fs}; 
 use std::cmp::Ordering;
 use crossterm::{cursor, event, execute, queue, style, terminal};
 use std::path::PathBuf;
 
-const VERSION: &str = "0.0.3";
+const VERSION: &str = "0.0.4";
 const TAB_STOP: usize = 8;
+const QUIT_TIMES: u8 = 3;
+
+#[macro_export]
+macro_rules! prompt {
+    ($output:expr,$($args:tt)*) => {{
+        let output:&mut Output = $output;
+        let mut input = String::with_capacity(32);
+        loop {
+            output.status_message.set_message(format!($($args)*, input));
+            output.refresh_screen()?;
+            match Reader.read_key()? {
+                KeyEvent {
+                    code:KeyCode::Enter,
+                    modifiers:KeyModifiers::NONE
+                } => {
+                    if !input.is_empty() {
+                        output.status_message.set_message(String::new());
+                        break;
+                    }
+                }
+                KeyEvent {
+                    code: KeyCode::Esc,
+                    ..
+                } => {
+                    output.status_message.set_message(String::new());
+                    input.clear();
+                    break;
+                }
+                
+                KeyEvent {
+                    code: KeyCode::Backspace | KeyCode::Delete,
+                    modifiers: KeyModifiers::NONE,
+                } =>  {
+                    input.pop();
+                }
+                
+                KeyEvent {
+                    code: code @ (KeyCode::Char(..) | KeyCode::Tab),
+                    modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                } => input.push(match code {
+                        KeyCode::Tab => '\t',
+                        KeyCode::Char(ch) => ch,
+                        _ => unreachable!(),
+                    }),
+
+                _=> {}
+            }
+        }
+        if input.is_empty() { None } else { Some (input) }
+    }};
+}
 
 struct CleanUp;
 
@@ -169,20 +220,22 @@ struct Output {
     editor_contents: EditorContents,
     cursor_controller: CursorController,
     editor_rows: EditorRows,
-    status_message: StatusMessage
+    status_message: StatusMessage,
+    dirty: u64
 }
 
 impl Output {
     fn new() -> Self {
         let win_size = terminal::size()
-            .map(|(x, y)| (x as usize, y as usize - 2)) 
+            .map(|(x, y)| (x as usize, y as usize - 2))
             .unwrap();
         Self {
             win_size,
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
             editor_rows: EditorRows::new(),
-            status_message: StatusMessage::new("HELP: Ctrl+Q = Quit".into()),
+            status_message: StatusMessage::new("HELP: Ctrl-S = Save | Ctrl-Q = Quit ".into()),
+            dirty: 0, 
         }
     }
 
@@ -232,13 +285,14 @@ impl Output {
         self.editor_contents
             .push_str(&style::Attribute::Reverse.to_string());
         let info = format!(
-            "{} -- {} lines",
+            "{} {} -- {} lines", 
             self.editor_rows
                 .filename
                 .as_ref()
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str())
                 .unwrap_or("[No Name]"),
+            if self.dirty > 0 { "(modified)" } else { "" }, 
             self.editor_rows.number_of_rows()
         );
         let info_len = cmp::min(info.len(), self.win_size.0);
@@ -258,7 +312,7 @@ impl Output {
         }
         self.editor_contents
             .push_str(&style::Attribute::Reset.to_string());
-        self.editor_contents.push_str("\r\n"); 
+        self.editor_contents.push_str("\r\n");
     }
 
     fn draw_message_bar(&mut self) {
@@ -289,14 +343,66 @@ impl Output {
         self.editor_contents.flush()
     }
 
+    fn insert_newline(&mut self) {
+        if self.cursor_controller.cursor_x == 0 {
+            self.editor_rows
+                .insert_row(self.cursor_controller.cursor_y, String::new())
+        } else {
+            let current_row = self
+                .editor_rows
+                .get_editor_row_mut(self.cursor_controller.cursor_y);
+            let new_row_content = current_row.row_content[self.cursor_controller.cursor_x..].into();
+            current_row
+                .row_content
+                .truncate(self.cursor_controller.cursor_x);
+            EditorRows::render_row(current_row);
+            self.editor_rows
+                .insert_row(self.cursor_controller.cursor_y + 1, new_row_content);
+        }
+        self.cursor_controller.cursor_x = 0;
+        self.cursor_controller.cursor_y += 1;
+        self.dirty += 1;
+    }
+
     fn insert_char(&mut self, ch: char) {
         if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
-            self.editor_rows.insert_row()
+            self.editor_rows
+                .insert_row(self.editor_rows.number_of_rows(), String::new()); 
+            self.dirty += 1;
         }
         self.editor_rows
             .get_editor_row_mut(self.cursor_controller.cursor_y)
             .insert_char(self.cursor_controller.cursor_x, ch);
         self.cursor_controller.cursor_x += 1;
+        self.dirty += 1;
+    }
+
+    fn delete_char(&mut self) {
+        if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
+            return;
+        }
+        if self.cursor_controller.cursor_y == 0 && self.cursor_controller.cursor_x == 0 {
+            return;
+        }
+        let row = self
+            .editor_rows
+            .get_editor_row_mut(self.cursor_controller.cursor_y);
+        if self.cursor_controller.cursor_x > 0 {
+            row.delete_char(self.cursor_controller.cursor_x - 1);
+            self.cursor_controller.cursor_x -= 1;
+            
+        } 
+        else {
+            let previous_row_content = self
+                .editor_rows
+                .get_row(self.cursor_controller.cursor_y - 1);
+            self.cursor_controller.cursor_x = previous_row_content.len();
+            self.editor_rows
+                .join_adjacent_rows(self.cursor_controller.cursor_y);
+            self.cursor_controller.cursor_y -= 1;
+        }
+        self.dirty += 1;
+        
     }
 
     fn move_cursor(&mut self, direction: KeyCode) {
@@ -362,7 +468,13 @@ impl Row {
         self.row_content.insert(at, ch);
         EditorRows::render_row(self)
     }
+
+    fn delete_char(&mut self, at: usize) {
+        self.row_content.remove(at);
+        EditorRows::render_row(self)
+    }
 }
+
 struct EditorRows {
     row_contents: Vec<Row>,
     filename: Option<PathBuf>
@@ -394,6 +506,24 @@ impl EditorRows {
         }
     }
     
+    fn save(&self) -> std::io::Result<usize> { 
+        match &self.filename {
+            None => Err(std::io::Error::new(ErrorKind::Other, "no file name specified")),
+            Some(name) => {
+                let mut file = fs::OpenOptions::new().write(true).create(true).open(name)?;
+                let contents: String = self
+                    .row_contents
+                    .iter()
+                    .map(|it| it.row_content.as_str())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
+                file.set_len(contents.len() as u64)?;
+                file.write_all(contents.as_bytes())?; 
+                Ok(contents.as_bytes().len()) 
+            }
+        }
+    }
+
     fn get_render(&self, at: usize) -> &String {
         &self.row_contents[at].render
     }
@@ -411,8 +541,10 @@ impl EditorRows {
         &self.row_contents[at].row_content
     }
 
-    fn insert_row(&mut self) {
-        self.row_contents.push(Row::default());
+    fn insert_row(&mut self, at: usize, contents: String) {
+        let mut new_row = Row::new(contents, String::new());
+        EditorRows::render_row(&mut new_row);
+        self.row_contents.insert(at, new_row);
     }
 
     fn get_editor_row_mut(&mut self, at: usize) -> &mut Row {
@@ -439,11 +571,19 @@ impl EditorRows {
             }
         });
     }
+
+    fn join_adjacent_rows(&mut self, at: usize) {
+        let current_row = self.row_contents.remove(at);
+        let previous_row = self.get_editor_row_mut(at - 1);
+        previous_row.row_content.push_str(&current_row.row_content);
+        Self::render_row(previous_row);
+    }
 }
 
 struct Editor {
     reader: Reader,
-    output: Output
+    output: Output,
+    quit_times: u8
 }
 
 
@@ -452,6 +592,7 @@ impl Editor {
         Self {
             reader: Reader,
             output: Output::new(),
+            quit_times: QUIT_TIMES, 
         }
     }
 
@@ -460,7 +601,17 @@ impl Editor {
             KeyEvent {
                 code: KeyCode::Char('q'),
                 modifiers: KeyModifiers::CONTROL,
-            } => return Ok(false),
+            } => {
+                if self.output.dirty > 0 && self.quit_times > 0 {
+                    self.output.status_message.set_message(format!(
+                        "WARNING!!! File has unsaved changes. Press Ctrl-Q {} more times to quit.",
+                        self.quit_times
+                    ));
+                    self.quit_times -= 1;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
             KeyEvent {
                 code:
                     direction
@@ -495,6 +646,42 @@ impl Editor {
                 })
             }
             KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers: KeyModifiers::CONTROL,
+            } => {
+                
+                if matches!(self.output.editor_rows.filename, None) {
+                    let prompt = prompt!(&mut self.output, "Save as : {} (ESC to cancel)")
+                        .map(|it| it.into());
+                    if let None = prompt {
+                        self.output
+                            .status_message
+                            .set_message("Save Aborted".into());
+                        return Ok(true);
+                    }
+                    self.output.editor_rows.filename = prompt
+                }
+                self.output.editor_rows.save().map(|len| {
+                    self.output
+                        .status_message
+                        .set_message(format!("{} bytes written to disk", len));
+                    self.output.dirty = 0
+                })?;
+            }
+            KeyEvent {
+                code: key @ (KeyCode::Backspace | KeyCode::Delete),
+                modifiers: KeyModifiers::NONE,
+            } => {
+                if matches!(key, KeyCode::Delete) {
+                    self.output.move_cursor(KeyCode::Right)
+                }
+                self.output.delete_char()
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+            } => self.output.insert_newline(),
+            KeyEvent {
                 code: code @ (KeyCode::Char(..) | KeyCode::Tab),
                 modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
             } => self.output.insert_char(match code {
@@ -504,6 +691,7 @@ impl Editor {
             }),
             _ => {}
         }
+        self.quit_times = QUIT_TIMES;
         Ok(true)
     }
 
