@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use crossterm::{cursor, event, execute, queue, style, terminal};
 use std::path::PathBuf;
 
-const VERSION: &str = "0.0.2";
+const VERSION: &str = "0.0.3";
 const TAB_STOP: usize = 8;
 
 struct CleanUp;
@@ -182,7 +182,7 @@ impl Output {
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
             editor_rows: EditorRows::new(),
-            status_message: StatusMessage::new("HELP: Ctrl-Q = Quit".into()),
+            status_message: StatusMessage::new("HELP: Ctrl+Q = Quit".into()),
         }
     }
 
@@ -289,6 +289,16 @@ impl Output {
         self.editor_contents.flush()
     }
 
+    fn insert_char(&mut self, ch: char) {
+        if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
+            self.editor_rows.insert_row()
+        }
+        self.editor_rows
+            .get_editor_row_mut(self.cursor_controller.cursor_y)
+            .insert_char(self.cursor_controller.cursor_x, ch);
+        self.cursor_controller.cursor_x += 1;
+    }
+
     fn move_cursor(&mut self, direction: KeyCode) {
         self.cursor_controller
             .move_cursor(direction, &self.editor_rows); 
@@ -334,17 +344,23 @@ impl std::io::Write for EditorContents {
     }
 }
 
+#[derive(Default)] 
 struct Row {
-    row_content: Box<str>,
+    row_content: String,
     render: String,
 }
 
 impl Row {
-    fn new(row_content: Box<str>, render: String) -> Self {
+    fn new(row_content: String, render: String) -> Self {
         Self {
             row_content,
             render,
         }
+    }
+
+    fn insert_char(&mut self, at: usize, ch: char) {
+        self.row_content.insert(at, ch);
+        EditorRows::render_row(self)
     }
 }
 struct EditorRows {
@@ -393,6 +409,14 @@ impl EditorRows {
 
     fn get_row(&self, at: usize) -> &str {
         &self.row_contents[at].row_content
+    }
+
+    fn insert_row(&mut self) {
+        self.row_contents.push(Row::default());
+    }
+
+    fn get_editor_row_mut(&mut self, at: usize) -> &mut Row {
+        &mut self.row_contents[at]
     }
 
     fn render_row(row: &mut Row) {
@@ -470,6 +494,14 @@ impl Editor {
                     });
                 })
             }
+            KeyEvent {
+                code: code @ (KeyCode::Char(..) | KeyCode::Tab),
+                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+            } => self.output.insert_char(match code {
+                KeyCode::Tab => '\t',
+                KeyCode::Char(ch) => ch,
+                _ => unreachable!(),
+            }),
             _ => {}
         }
         Ok(true)
